@@ -1,59 +1,32 @@
-/**
- * Ghostwire Identity Service
- * Manages long-term identity: keypair, deviceID, profile, contacts
- * All stored in expo-secure-store (OS-encrypted, survives app kills)
- */
-
 import * as SecureStore from 'expo-secure-store'
-import {
-  generateKeyPair,
-  exportPublicKey,
-  exportPrivateKey,
-  importPublicKey,
-  importPrivateKey,
-  generateDeviceId,
-} from './crypto'
-
-// ─── Types ────────────────────────────────────────────────────────
-
-export interface Contact {
-  deviceId: string
-  publicKeyJwk: JsonWebKey
-  name: string
-  addedAt: number
-}
+import { generateDeviceId, generateSharedKey } from './crypto'
 
 export interface MyProfile {
   deviceId: string
   name: string
-  publicKeyJwk: JsonWebKey
-  privateKeyJwk: JsonWebKey
+  sharedKey: string   // included in QR so contacts can encrypt to us
   createdAt: number
 }
 
-// ─── Keys ─────────────────────────────────────────────────────────
+export interface Contact {
+  deviceId: string
+  name: string
+  sharedKey: string   // their key from QR scan
+  addedAt: number
+}
 
 const KEYS = {
   PROFILE: 'gw_profile',
   CONTACTS: 'gw_contacts',
 }
 
-// ─── Profile ──────────────────────────────────────────────────────
-
 export async function createIdentity(name: string): Promise<MyProfile> {
-  const keypair = await generateKeyPair()
-  const publicKeyJwk = await exportPublicKey(keypair.publicKey)
-  const privateKeyJwk = await exportPrivateKey(keypair.privateKey)
-  const deviceId = generateDeviceId()
-
   const profile: MyProfile = {
-    deviceId,
+    deviceId: generateDeviceId(),
     name,
-    publicKeyJwk,
-    privateKeyJwk,
+    sharedKey: generateSharedKey(),
     createdAt: Date.now(),
   }
-
   await SecureStore.setItemAsync(KEYS.PROFILE, JSON.stringify(profile))
   return profile
 }
@@ -61,12 +34,12 @@ export async function createIdentity(name: string): Promise<MyProfile> {
 export async function getProfile(): Promise<MyProfile | null> {
   const raw = await SecureStore.getItemAsync(KEYS.PROFILE)
   if (!raw) return null
-  return JSON.parse(raw) as MyProfile
+  return JSON.parse(raw)
 }
 
 export async function updateProfileName(name: string): Promise<void> {
   const profile = await getProfile()
-  if (!profile) throw new Error('No profile found')
+  if (!profile) throw new Error('No profile')
   profile.name = name
   await SecureStore.setItemAsync(KEYS.PROFILE, JSON.stringify(profile))
 }
@@ -76,87 +49,63 @@ export async function deleteIdentity(): Promise<void> {
   await SecureStore.deleteItemAsync(KEYS.CONTACTS)
 }
 
-// ─── Contacts ─────────────────────────────────────────────────────
-
 export async function getContacts(): Promise<Contact[]> {
   const raw = await SecureStore.getItemAsync(KEYS.CONTACTS)
   if (!raw) return []
-  return JSON.parse(raw) as Contact[]
+  return JSON.parse(raw)
 }
 
 export async function addContact(contact: Contact): Promise<void> {
   const contacts = await getContacts()
-  const existing = contacts.findIndex((c) => c.deviceId === contact.deviceId)
-  if (existing >= 0) {
-    contacts[existing] = contact // update if already exists
-  } else {
-    contacts.push(contact)
-  }
+  const existing = contacts.findIndex(c => c.deviceId === contact.deviceId)
+  if (existing >= 0) contacts[existing] = contact
+  else contacts.push(contact)
   await SecureStore.setItemAsync(KEYS.CONTACTS, JSON.stringify(contacts))
 }
 
 export async function getContact(deviceId: string): Promise<Contact | null> {
   const contacts = await getContacts()
-  return contacts.find((c) => c.deviceId === deviceId) ?? null
+  return contacts.find(c => c.deviceId === deviceId) ?? null
 }
 
 export async function renameContact(deviceId: string, name: string): Promise<void> {
   const contacts = await getContacts()
-  const contact = contacts.find((c) => c.deviceId === deviceId)
-  if (!contact) throw new Error('Contact not found')
-  contact.name = name
+  const c = contacts.find(c => c.deviceId === deviceId)
+  if (!c) throw new Error('Contact not found')
+  c.name = name
   await SecureStore.setItemAsync(KEYS.CONTACTS, JSON.stringify(contacts))
 }
 
 export async function deleteContact(deviceId: string): Promise<void> {
   const contacts = await getContacts()
-  const filtered = contacts.filter((c) => c.deviceId !== deviceId)
-  await SecureStore.setItemAsync(KEYS.CONTACTS, JSON.stringify(filtered))
+  await SecureStore.setItemAsync(
+    KEYS.CONTACTS,
+    JSON.stringify(contacts.filter(c => c.deviceId !== deviceId))
+  )
 }
 
 // ─── QR Payload ───────────────────────────────────────────────────
+// QR contains deviceId + sharedKey
+// Anyone who scans gets the key to encrypt messages to you
 
 export interface QRPayload {
   deviceId: string
-  publicKeyJwk: JsonWebKey
-  v: number // version
+  sharedKey: string
+  v: number
 }
 
 export function buildQRPayload(profile: MyProfile): string {
-  const payload: QRPayload = {
+  return JSON.stringify({
     deviceId: profile.deviceId,
-    publicKeyJwk: profile.publicKeyJwk,
+    sharedKey: profile.sharedKey,
     v: 1,
-  }
-  return JSON.stringify(payload)
+  })
 }
 
 export function parseQRPayload(raw: string): QRPayload | null {
   try {
-    const parsed = JSON.parse(raw) as QRPayload
-    if (!parsed.deviceId || !parsed.publicKeyJwk || !parsed.v) return null
-    return parsed
-  } catch {
-    return null
-  }
-}
-
-// ─── Crypto Keys from Profile ─────────────────────────────────────
-
-export async function getMyPrivateKey() {
-  const profile = await getProfile()
-  if (!profile) throw new Error('No profile')
-  return importPrivateKey(profile.privateKeyJwk)
-}
-
-export async function getMyPublicKey() {
-  const profile = await getProfile()
-  if (!profile) throw new Error('No profile')
-  return importPublicKey(profile.publicKeyJwk)
-}
-
-export async function getContactPublicKey(deviceId: string) {
-  const contact = await getContact(deviceId)
-  if (!contact) throw new Error('Contact not found')
-  return importPublicKey(contact.publicKeyJwk)
+    const p = JSON.parse(raw)
+    if (!p.deviceId || !p.sharedKey) return null
+    return p
+  } catch { return null }
 }

@@ -1,19 +1,10 @@
-/**
- * Ghostwire Database Service
- * Encrypted SQLite via expo-sqlite
- * Messages encrypted with AES-256-GCM before storage
- * Wipe = delete rows (encrypted blobs are useless without session key anyway)
- */
-
 import * as SQLite from 'expo-sqlite'
 import { encryptMessage, decryptMessage } from './crypto'
-
-// ─── Types ────────────────────────────────────────────────────────
 
 export interface Message {
   id: string
   contactId: string
-  content: string       // plaintext (decrypted on read)
+  content: string
   timestamp: number
   direction: 'sent' | 'received'
   status: 'sending' | 'delivered' | 'failed'
@@ -28,24 +19,27 @@ interface RawMessage {
   status: string
 }
 
-// ─── DB Instance ──────────────────────────────────────────────────
-
 let db: SQLite.SQLiteDatabase | null = null
 
 export async function initDatabase(): Promise<void> {
-  db = await SQLite.openDatabaseAsync('ghostwire.db')
-  await db.execAsync(`
-    CREATE TABLE IF NOT EXISTS messages (
-      id TEXT PRIMARY KEY,
-      contact_id TEXT NOT NULL,
-      content_encrypted TEXT NOT NULL,
-      timestamp INTEGER NOT NULL,
-      direction TEXT NOT NULL,
-      status TEXT NOT NULL DEFAULT 'delivered'
-    );
-    CREATE INDEX IF NOT EXISTS idx_contact_time 
-      ON messages(contact_id, timestamp);
-  `)
+  try {
+    db = SQLite.openDatabaseSync('ghostwire.db')
+    db.execSync(`
+      CREATE TABLE IF NOT EXISTS messages (
+        id TEXT PRIMARY KEY,
+        contact_id TEXT NOT NULL,
+        content_encrypted TEXT NOT NULL,
+        timestamp INTEGER NOT NULL,
+        direction TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'delivered'
+      );
+      CREATE INDEX IF NOT EXISTS idx_contact_time
+        ON messages(contact_id, timestamp);
+    `)
+  } catch (e) {
+    console.error('DB init error:', e)
+    throw e
+  }
 }
 
 function getDb(): SQLite.SQLiteDatabase {
@@ -53,26 +47,21 @@ function getDb(): SQLite.SQLiteDatabase {
   return db
 }
 
-// ─── Messages ─────────────────────────────────────────────────────
-
 export async function saveMessage(
-  message: Omit<Message, 'content'> & { content: string },
+  message: Message,
   sessionKey: CryptoKey
 ): Promise<void> {
   const encrypted = await encryptMessage(sessionKey, message.content)
-  const database = getDb()
-  await database.runAsync(
-    `INSERT OR REPLACE INTO messages 
+  getDb().runSync(
+    `INSERT OR REPLACE INTO messages
       (id, contact_id, content_encrypted, timestamp, direction, status)
      VALUES (?, ?, ?, ?, ?, ?)`,
-    [
-      message.id,
-      message.contactId,
-      encrypted,
-      message.timestamp,
-      message.direction,
-      message.status,
-    ]
+    message.id,
+    message.contactId,
+    encrypted,
+    message.timestamp,
+    message.direction,
+    message.status
   )
 }
 
@@ -81,15 +70,13 @@ export async function getMessages(
   sessionKey: CryptoKey,
   limit = 100
 ): Promise<Message[]> {
-  const database = getDb()
-  const rows = await database.getAllAsync<RawMessage>(
-    `SELECT * FROM messages 
-     WHERE contact_id = ? 
-     ORDER BY timestamp DESC 
+  const rows = getDb().getAllSync<RawMessage>(
+    `SELECT * FROM messages
+     WHERE contact_id = ?
+     ORDER BY timestamp DESC
      LIMIT ?`,
-    [contactId, limit]
+    contactId, limit
   )
-
   const messages: Message[] = []
   for (const row of rows.reverse()) {
     try {
@@ -102,9 +89,7 @@ export async function getMessages(
         direction: row.direction as 'sent' | 'received',
         status: row.status as Message['status'],
       })
-    } catch {
-      // Skip undecryptable messages (from old sessions with different key)
-    }
+    } catch {}
   }
   return messages
 }
@@ -113,26 +98,16 @@ export async function updateMessageStatus(
   id: string,
   status: Message['status']
 ): Promise<void> {
-  await getDb().runAsync(
-    'UPDATE messages SET status = ? WHERE id = ?',
-    [status, id]
-  )
+  getDb().runSync('UPDATE messages SET status = ? WHERE id = ?', status, id)
 }
 
-// ─── Wipe ─────────────────────────────────────────────────────────
-
 export async function wipeContactMessages(contactId: string): Promise<void> {
-  await getDb().runAsync(
-    'DELETE FROM messages WHERE contact_id = ?',
-    [contactId]
-  )
+  getDb().runSync('DELETE FROM messages WHERE contact_id = ?', contactId)
 }
 
 export async function wipeAllMessages(): Promise<void> {
-  await getDb().runAsync('DELETE FROM messages')
+  getDb().runSync('DELETE FROM messages')
 }
-
-// ─── Chat Preview (for contact list) ─────────────────────────────
 
 export interface ChatPreview {
   contactId: string
@@ -142,30 +117,28 @@ export interface ChatPreview {
 }
 
 export async function getChatPreviews(): Promise<ChatPreview[]> {
-  const database = getDb()
-  const rows = await database.getAllAsync<{
+  const rows = getDb().getAllSync<{
     contact_id: string
     content_encrypted: string
     timestamp: number
     unread: number
   }>(`
-    SELECT 
+    SELECT
       contact_id,
       content_encrypted,
       timestamp,
-      (SELECT COUNT(*) FROM messages m2 
-       WHERE m2.contact_id = m.contact_id 
+      (SELECT COUNT(*) FROM messages m2
+       WHERE m2.contact_id = m.contact_id
        AND m2.direction = 'received') as unread
     FROM messages m
     WHERE timestamp = (
-      SELECT MAX(timestamp) FROM messages m3 
+      SELECT MAX(timestamp) FROM messages m3
       WHERE m3.contact_id = m.contact_id
     )
     GROUP BY contact_id
     ORDER BY timestamp DESC
   `)
-
-  return rows.map((r) => ({
+  return rows.map(r => ({
     contactId: r.contact_id,
     lastMessageEncrypted: r.content_encrypted,
     lastTimestamp: r.timestamp,
