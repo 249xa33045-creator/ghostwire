@@ -30,7 +30,7 @@ class RegisterRequest(BaseModel):
     publicKeyJwk: dict
     pushToken: Optional[str] = None
 
-@app.get("/")
+@app.api_route("/", methods=["GET", "HEAD"])
 def health():
     return {
         "status": "ok",
