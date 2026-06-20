@@ -9,28 +9,46 @@ export interface SignalMessage {
 }
 
 export type SignalHandler = (msg: SignalMessage) => void
+export type StatusHandler = (status: 'connecting' | 'connected' | 'disconnected' | 'reconnecting') => void
 
 class SignalingService {
   private ws: WebSocket | null = null
   private handler: SignalHandler | null = null
+  private statusHandler: StatusHandler | null = null
   private myDeviceId: string = ''
   private pingInterval: ReturnType<typeof setInterval> | null = null
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null
+  private shouldReconnect = true
+  private reconnectAttempts = 0
   connected = false
 
   setHandler(handler: SignalHandler) {
     this.handler = handler
   }
 
+  setStatusHandler(handler: StatusHandler) {
+    this.statusHandler = handler
+  }
+
   connect(deviceId: string): Promise<void> {
     this.myDeviceId = deviceId
+    this.shouldReconnect = true
+    this.reconnectAttempts = 0
+    return this._connectInternal()
+  }
+
+  private _connectInternal(): Promise<void> {
+    this.statusHandler?.('connecting')
     return new Promise((resolve, reject) => {
       try {
-        const ws = new WebSocket(`${WS_URL}?deviceId=${deviceId}`)
+        const ws = new WebSocket(`${WS_URL}?deviceId=${this.myDeviceId}`)
 
         ws.onopen = () => {
           this.ws = ws
           this.connected = true
+          this.reconnectAttempts = 0
           this.startKeepalive()
+          this.statusHandler?.('connected')
           resolve()
         }
 
@@ -46,15 +64,25 @@ class SignalingService {
           this.connected = false
           this.ws = null
           this.stopKeepalive()
+          if (this.shouldReconnect) {
+            this.statusHandler?.('reconnecting')
+            this.scheduleReconnect()
+          } else {
+            this.statusHandler?.('disconnected')
+          }
         }
 
         ws.onerror = () => {
           this.connected = false
-          reject(new Error('WebSocket connection failed'))
+          if (this.reconnectAttempts === 0) {
+            reject(new Error('WebSocket connection failed'))
+          }
         }
 
         setTimeout(() => {
-          if (!this.connected) reject(new Error('Connection timeout'))
+          if (!this.connected && this.reconnectAttempts === 0) {
+            reject(new Error('Connection timeout'))
+          }
         }, 15000)
       } catch (e) {
         reject(e)
@@ -62,12 +90,24 @@ class SignalingService {
     })
   }
 
+  private scheduleReconnect() {
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer)
+    this.reconnectAttempts++
+    // Exponential backoff, max 10s
+    const delay = Math.min(1000 * this.reconnectAttempts, 10000)
+    this.reconnectTimer = setTimeout(() => {
+      if (this.shouldReconnect) {
+        this._connectInternal().catch(() => {})
+      }
+    }, delay)
+  }
+
   private startKeepalive() {
     this.pingInterval = setInterval(() => {
       if (this.ws && this.ws.readyState === WebSocket.OPEN) {
         this.ws.send(JSON.stringify({ type: 'ping', from_id: this.myDeviceId, to: '', payload: '' }))
       }
-    }, 20000) // every 20s, well under any proxy timeout
+    }, 20000)
   }
 
   private stopKeepalive() {
@@ -88,6 +128,8 @@ class SignalingService {
   }
 
   disconnect() {
+    this.shouldReconnect = false
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer)
     this.stopKeepalive()
     this.ws?.close()
     this.ws = null

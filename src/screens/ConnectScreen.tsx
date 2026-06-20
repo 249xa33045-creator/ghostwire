@@ -1,11 +1,3 @@
-/**
- * ConnectScreen
- * QR-based WebRTC SDP exchange for same-WiFi P2P connection
- * 
- * HOST flow:   Create offer → show QR → scan guest's answer QR → connected
- * GUEST flow:  Scan host's offer QR → show answer QR → connected
- */
-
 import React, { useState, useEffect } from 'react'
 import {
   View, Text, TouchableOpacity, StyleSheet,
@@ -15,17 +7,14 @@ import QRCode from 'react-native-qrcode-svg'
 import { CameraView, useCameraPermissions } from 'expo-camera'
 import { colors, spacing, text, radius } from '../utils/tokens'
 import { webrtcService } from '../services/webrtc'
-import { Contact } from '../services/identity'
+import { Contact, getProfile } from '../services/identity'
 
 type Step =
-  | 'choose'           // pick host or guest
-  | 'host_generating'  // creating offer
-  | 'host_show_qr'     // showing offer QR
-  | 'host_scanning'    // scanning guest's answer
-  | 'guest_scanning'   // scanning host's offer
-  | 'guest_show_qr'    // showing answer QR
-  | 'connecting'       // WebRTC connecting
-  | 'connected'
+  | 'choose'
+  | 'host_generating' | 'host_show_qr' | 'host_scanning'
+  | 'guest_scanning' | 'guest_show_qr'
+  | 'remote_connecting'
+  | 'connecting' | 'connected'
 
 interface Props {
   contact: Contact
@@ -39,6 +28,7 @@ export default function ConnectScreen({ contact, onConnected, onCancel }: Props)
   const [answerSDP, setAnswerSDP] = useState('')
   const [permission, requestPermission] = useCameraPermissions()
   const [scanned, setScanned] = useState(false)
+  const [connectMsg, setConnectMsg] = useState('Connecting via internet...')
 
   useEffect(() => {
     webrtcService.init({
@@ -50,10 +40,10 @@ export default function ConnectScreen({ contact, onConnected, onCancel }: Props)
       onDisconnected: () => {},
       onError: (e) => Alert.alert('Error', e),
     })
-    return () => { webrtcService.close() }
+    return () => {}
   }, [])
 
-  // ── HOST ──────────────────────────────────────────────
+  // ── SAME WIFI (QR) ──────────────────────────────────────
 
   async function startAsHost() {
     setStep('host_generating')
@@ -89,8 +79,6 @@ export default function ConnectScreen({ contact, onConnected, onCancel }: Props)
     }
   }
 
-  // ── GUEST ─────────────────────────────────────────────
-
   function startAsGuest() {
     if (!permission?.granted) {
       requestPermission().then(() => {
@@ -118,6 +106,37 @@ export default function ConnectScreen({ contact, onConnected, onCancel }: Props)
     }
   }
 
+  // ── INTERNET (Render) ───────────────────────────────────
+
+  async function connectViaInternet() {
+    setStep('remote_connecting')
+    setConnectMsg('Waking up server...')
+    try {
+      const profile = await getProfile()
+      if (!profile) throw new Error('No profile')
+
+      // Wake server first (handles free-tier cold start, can take up to 60s)
+      const wakeStart = Date.now()
+      try {
+        await fetch('https://ghostwire-yn6a.onrender.com/', { method: 'GET' })
+      } catch {}
+      const wakeDuration = Date.now() - wakeStart
+      if (wakeDuration > 3000) {
+        setConnectMsg('Server was asleep, waking up...')
+        await new Promise(r => setTimeout(r, 1000))
+      }
+
+      setConnectMsg('Connecting to ' + contact.name + '...')
+      const isInitiator = profile.deviceId < contact.deviceId
+      await webrtcService.connectViaServer(profile.deviceId, contact.deviceId, isInitiator)
+      setConnectMsg('Establishing encrypted channel...')
+      setStep('connecting')
+    } catch (e: any) {
+      Alert.alert('Connection failed', e.message || 'Could not connect via internet. Make sure ' + contact.name + ' has the app open too.')
+      setStep('choose')
+    }
+  }
+
   // ── RENDER ────────────────────────────────────────────
 
   return (
@@ -132,18 +151,33 @@ export default function ConnectScreen({ contact, onConnected, onCancel }: Props)
 
       {step === 'choose' && (
         <View style={styles.center}>
-          <Text style={styles.instruction}>
-            Both devices must be on the same WiFi or hotspot.{'\n\n'}
-            One person is the Host, the other is the Guest.
-          </Text>
-          <TouchableOpacity style={styles.btn} onPress={startAsHost}>
+          <Text style={styles.instruction}>How do you want to connect?</Text>
+
+          <TouchableOpacity style={styles.btn} onPress={connectViaInternet}>
+            <Text style={styles.btnText}>Connect via Internet</Text>
+            <Text style={styles.btnSub}>Works anywhere, uses Render server</Text>
+          </TouchableOpacity>
+
+          <View style={styles.divider}>
+            <Text style={styles.dividerText}>or, same WiFi only</Text>
+          </View>
+
+          <TouchableOpacity style={[styles.btn, styles.btnSecondary]} onPress={startAsHost}>
             <Text style={styles.btnText}>I am the Host</Text>
-            <Text style={styles.btnSub}>Creates the connection</Text>
+            <Text style={styles.btnSub}>QR code, same WiFi/hotspot</Text>
           </TouchableOpacity>
           <TouchableOpacity style={[styles.btn, styles.btnSecondary]} onPress={startAsGuest}>
             <Text style={styles.btnText}>I am the Guest</Text>
-            <Text style={styles.btnSub}>Joins the connection</Text>
+            <Text style={styles.btnSub}>QR code, same WiFi/hotspot</Text>
           </TouchableOpacity>
+        </View>
+      )}
+
+      {step === 'remote_connecting' && (
+        <View style={styles.center}>
+          <ActivityIndicator color={colors.purple} size="large" />
+          <Text style={styles.instruction}>{connectMsg}</Text>
+          <Text style={styles.hintSmall}>First connection of the session can take up to a minute.{'\n'}Make sure {contact.name} has the app open too.</Text>
         </View>
       )}
 
@@ -156,10 +190,7 @@ export default function ConnectScreen({ contact, onConnected, onCancel }: Props)
 
       {step === 'host_show_qr' && (
         <ScrollView contentContainerStyle={styles.center}>
-          <Text style={styles.instruction}>
-            Show this QR to {contact.name}.{'\n'}
-            They will scan it on their device.
-          </Text>
+          <Text style={styles.instruction}>Show this QR to {contact.name}.{'\n'}They will scan it on their device.</Text>
           <View style={styles.qrWrap}>
             <QRCode value={offerSDP} size={220} backgroundColor="#f0f0f0" color="#0a0a0a" />
           </View>
@@ -172,12 +203,7 @@ export default function ConnectScreen({ contact, onConnected, onCancel }: Props)
       {step === 'host_scanning' && (
         <View style={styles.container}>
           <Text style={styles.scanLabel}>Scan {contact.name}'s answer QR</Text>
-          <CameraView
-            style={styles.camera}
-            facing="back"
-            onBarcodeScanned={handleHostScanAnswer}
-            barcodeScannerSettings={{ barcodeTypes: ['qr'] }}
-          >
+          <CameraView style={styles.camera} facing="back" onBarcodeScanned={handleHostScanAnswer} barcodeScannerSettings={{ barcodeTypes: ['qr'] }}>
             <View style={styles.scanOverlay}>
               <View style={styles.scanFrame}>
                 <View style={[styles.corner, styles.cornerTL]} />
@@ -193,12 +219,7 @@ export default function ConnectScreen({ contact, onConnected, onCancel }: Props)
       {step === 'guest_scanning' && (
         <View style={styles.container}>
           <Text style={styles.scanLabel}>Scan {contact.name}'s offer QR</Text>
-          <CameraView
-            style={styles.camera}
-            facing="back"
-            onBarcodeScanned={handleGuestScanOffer}
-            barcodeScannerSettings={{ barcodeTypes: ['qr'] }}
-          >
+          <CameraView style={styles.camera} facing="back" onBarcodeScanned={handleGuestScanOffer} barcodeScannerSettings={{ barcodeTypes: ['qr'] }}>
             <View style={styles.scanOverlay}>
               <View style={styles.scanFrame}>
                 <View style={[styles.corner, styles.cornerTL]} />
@@ -213,10 +234,7 @@ export default function ConnectScreen({ contact, onConnected, onCancel }: Props)
 
       {step === 'guest_show_qr' && (
         <ScrollView contentContainerStyle={styles.center}>
-          <Text style={styles.instruction}>
-            Show this QR to {contact.name}.{'\n'}
-            They will scan it to complete the connection.
-          </Text>
+          <Text style={styles.instruction}>Show this QR to {contact.name}.{'\n'}They will scan it to complete the connection.</Text>
           <View style={styles.qrWrap}>
             <QRCode value={answerSDP} size={220} backgroundColor="#f0f0f0" color="#0a0a0a" />
           </View>
@@ -249,10 +267,13 @@ const styles = StyleSheet.create({
   title: { fontSize: text.md, color: colors.text, fontWeight: '600', flex: 1, textAlign: 'center' },
   center: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: spacing.xl, gap: spacing.lg },
   instruction: { fontSize: text.md, color: colors.textSecondary, textAlign: 'center', lineHeight: 24 },
+  hintSmall: { fontSize: text.xs, color: colors.textMuted, textAlign: 'center', lineHeight: 18, marginTop: spacing.sm },
   btn: { width: '100%', backgroundColor: colors.purple, borderRadius: radius.md, padding: spacing.md, alignItems: 'center', gap: spacing.xs },
   btnSecondary: { backgroundColor: colors.bgCard, borderWidth: 1, borderColor: colors.border },
   btnText: { fontSize: text.md, color: colors.text, fontWeight: '600' },
   btnSub: { fontSize: text.xs, color: colors.purpleLight },
+  divider: { flexDirection: 'row', alignItems: 'center', width: '100%', marginVertical: spacing.sm },
+  dividerText: { fontSize: text.xs, color: colors.textMuted, fontFamily: 'Courier New' },
   qrWrap: { padding: spacing.lg, backgroundColor: '#f0f0f0', borderRadius: radius.lg },
   camera: { flex: 1 },
   scanLabel: { color: colors.text, fontSize: text.md, textAlign: 'center', padding: spacing.md },
