@@ -32,12 +32,18 @@
           "cameraPermission": "Ghostwire needs camera to scan contact QR codes."
         }
       ],
-      "expo-sqlite"
+      "expo-sqlite",
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Ghostwire needs gallery access to scan QR codes from screenshots."
+        }
+      ]
     ],
     "scheme": "ghostwire",
     "extra": {
       "eas": {
-        "projectId": "103df176-747a-4216-a911-712369d8acff"
+        "projectId": "7feecf17-8d6c-48d0-b063-b49e2719d1a7"
       }
     }
   }

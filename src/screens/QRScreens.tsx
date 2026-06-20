@@ -5,12 +5,12 @@ import {
 } from 'react-native'
 import QRCode from 'react-native-qrcode-svg'
 import { CameraView, useCameraPermissions } from 'expo-camera'
+import * as ImagePicker from 'expo-image-picker'
 import { colors, spacing, text, radius } from '../utils/tokens'
 import { useStore } from '../store'
 import {
   addContact, getContacts,
   buildQRPayload, parseQRPayload,
-  MyProfile
 } from '../services/identity'
 
 export function MyQRScreen({ onClose }: { onClose: () => void }) {
@@ -28,7 +28,7 @@ export function MyQRScreen({ onClose }: { onClose: () => void }) {
       </View>
       <View style={styles.qrSection}>
         <Text style={styles.hint}>
-          Show this to a contact so they can add you.{'\n'}
+          Show this to a contact, or share a screenshot with someone far away.{'\n'}
           Scan once — never again.
         </Text>
         <View style={styles.qrWrap}>
@@ -43,6 +43,10 @@ export function MyQRScreen({ onClose }: { onClose: () => void }) {
           {profile?.deviceId?.match(/.{4}/g)?.join(' ') ?? '—'}
         </Text>
         <Text style={styles.name}>{profile?.name}</Text>
+        <Text style={styles.shareHint}>
+          Tip: take a screenshot and send it via WhatsApp, Telegram, etc.{'\n'}
+          They can add you using "Pick from Gallery" on their end.
+        </Text>
       </View>
     </View>
   )
@@ -60,29 +64,66 @@ export function ScanQRScreen({
   const [scannedPayload, setScannedPayload] = useState<{ deviceId: string, sharedKey: string } | null>(null)
   const [contactName, setContactName] = useState('')
   const [saving, setSaving] = useState(false)
+  const [pickingImage, setPickingImage] = useState(false)
   const { profile, setContacts } = useStore()
 
   useEffect(() => {
     if (!permission?.granted) requestPermission()
   }, [])
 
-  function handleScan({ data }: { data: string }) {
-    if (scanned) return
-    setScanned(true)
+  function processScannedData(data: string) {
     const payload = parseQRPayload(data)
     if (!payload) {
-      Alert.alert('Invalid QR', 'Not a Ghostwire contact.', [
-        { text: 'Try Again', onPress: () => setScanned(false) }
+      Alert.alert('Invalid QR', 'Not a Ghostwire contact code.', [
+        { text: 'OK', onPress: () => setScanned(false) }
       ])
       return
     }
     if (payload.deviceId === profile?.deviceId) {
-      Alert.alert("That's you", 'You scanned your own QR.', [
-        { text: 'Try Again', onPress: () => setScanned(false) }
+      Alert.alert("That's you", 'This is your own QR code.', [
+        { text: 'OK', onPress: () => setScanned(false) }
       ])
       return
     }
     setScannedPayload({ deviceId: payload.deviceId, sharedKey: payload.sharedKey })
+  }
+
+  function handleScan({ data }: { data: string }) {
+    if (scanned) return
+    setScanned(true)
+    processScannedData(data)
+  }
+
+  async function pickFromGallery() {
+    setPickingImage(true)
+    try {
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ImagePicker.MediaTypeOptions.Images,
+        quality: 1,
+      })
+
+      if (result.canceled || !result.assets?.[0]) {
+        setPickingImage(false)
+        return
+      }
+
+      const imageUri = result.assets[0].uri
+
+      // Use expo-camera's Scanner via a temporary scan, OR
+      // decode using a barcode reading library on the image
+      const { Camera } = await import('expo-camera')
+      const scanResult = await (Camera as any).scanFromURLAsync(imageUri, ['qr'])
+
+      if (scanResult && scanResult.length > 0) {
+        processScannedData(scanResult[0].data)
+      } else {
+        Alert.alert('No QR Found', 'Could not detect a QR code in that image. Try a clearer screenshot.')
+      }
+    } catch (e: any) {
+      Alert.alert('Error', 'Could not read QR from image: ' + (e.message || 'unknown error'))
+    } finally {
+      setPickingImage(false)
+    }
   }
 
   async function handleSave() {
@@ -109,7 +150,7 @@ export function ScanQRScreen({
     return (
       <View style={styles.container}>
         <View style={styles.header}>
-          <TouchableOpacity onPress={() => setScannedPayload(null)}>
+          <TouchableOpacity onPress={() => { setScannedPayload(null); setScanned(false) }}>
             <Text style={styles.back}>←</Text>
           </TouchableOpacity>
           <Text style={styles.title}>New Contact</Text>
@@ -164,6 +205,11 @@ export function ScanQRScreen({
           <TouchableOpacity style={styles.saveBtn} onPress={requestPermission}>
             <Text style={styles.saveBtnText}>Allow Camera</Text>
           </TouchableOpacity>
+          <TouchableOpacity style={styles.galleryBtn} onPress={pickFromGallery} disabled={pickingImage}>
+            {pickingImage
+              ? <ActivityIndicator color={colors.purpleLight} />
+              : <Text style={styles.galleryBtnText}>Or pick from gallery instead</Text>}
+          </TouchableOpacity>
         </View>
       </View>
     )
@@ -192,6 +238,17 @@ export function ScanQRScreen({
             <View style={[styles.corner, styles.cornerBR]} />
           </View>
           <Text style={styles.scanHint}>Align QR code within the frame</Text>
+
+          <TouchableOpacity style={styles.galleryFab} onPress={pickFromGallery} disabled={pickingImage}>
+            {pickingImage ? (
+              <ActivityIndicator color="#fff" size="small" />
+            ) : (
+              <>
+                <Text style={styles.galleryFabIcon}>🖼</Text>
+                <Text style={styles.galleryFabText}>Pick from Gallery</Text>
+              </>
+            )}
+          </TouchableOpacity>
         </View>
       </CameraView>
     </View>
@@ -209,6 +266,7 @@ const styles = StyleSheet.create({
   idLabel: { fontSize: text.xs, color: colors.textMuted, letterSpacing: 2, fontFamily: 'Courier New', marginTop: spacing.sm },
   idValue: { fontSize: text.sm, color: colors.purpleLight, fontFamily: 'Courier New', letterSpacing: 2 },
   name: { fontSize: text.lg, color: colors.text, fontWeight: '600' },
+  shareHint: { fontSize: text.xs, color: colors.textMuted, textAlign: 'center', lineHeight: 18, marginTop: spacing.md },
   camera: { flex: 1 },
   scanOverlay: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: spacing.xl },
   scanFrame: { width: 240, height: 240, position: 'relative' },
@@ -218,6 +276,11 @@ const styles = StyleSheet.create({
   cornerBL: { bottom: 0, left: 0, borderTopWidth: 0, borderRightWidth: 0 },
   cornerBR: { bottom: 0, right: 0, borderTopWidth: 0, borderLeftWidth: 0 },
   scanHint: { fontSize: text.sm, color: '#fff', backgroundColor: 'rgba(0,0,0,0.6)', paddingHorizontal: spacing.md, paddingVertical: spacing.sm, borderRadius: radius.full },
+  galleryFab: { flexDirection: 'row', alignItems: 'center', gap: spacing.xs, backgroundColor: 'rgba(124,58,237,0.9)', paddingHorizontal: spacing.lg, paddingVertical: spacing.sm, borderRadius: radius.full, marginTop: spacing.md },
+  galleryFabIcon: { fontSize: text.md },
+  galleryFabText: { fontSize: text.sm, color: '#fff', fontWeight: '600' },
+  galleryBtn: { marginTop: spacing.md },
+  galleryBtnText: { fontSize: text.sm, color: colors.purpleLight, textDecorationLine: 'underline' },
   namePrompt: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: spacing.xl, gap: spacing.md },
   successIcon: { width: 64, height: 64, borderRadius: 32, backgroundColor: colors.greenDim, alignItems: 'center', justifyContent: 'center' },
   successText: { fontSize: 28, color: colors.green },
