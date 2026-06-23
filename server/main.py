@@ -1,5 +1,5 @@
 """
-Ghostwire Signaling Server
+Ghostwire Signaling + Relay Server
 FastAPI + WebSockets on Render (free tier)
 """
 
@@ -11,6 +11,13 @@ import asyncio
 import json
 import os
 from datetime import datetime
+from supabase import create_client, Client
+
+SUPABASE_URL = os.environ.get("SUPABASE_URL")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
+supabase: Optional[Client] = None
+if SUPABASE_URL and SUPABASE_KEY:
+    supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 app = FastAPI(title="Ghostwire Signal Server")
 
@@ -29,6 +36,12 @@ class RegisterRequest(BaseModel):
     deviceId: str
     publicKeyJwk: dict
     pushToken: Optional[str] = None
+
+class RelayMessage(BaseModel):
+    to: str
+    from_id: str
+    payload: str
+    timestamp: str
 
 @app.api_route("/", methods=["GET", "HEAD"])
 def health():
@@ -61,17 +74,80 @@ async def unregister(device_id: str):
     pending_signals.pop(device_id, None)
     return {"ok": True}
 
+@app.post("/relay")
+async def relay_message(msg: RelayMessage):
+    data = {
+        "type": "relay",
+        "from_id": msg.from_id,
+        "to": msg.to,
+        "payload": msg.payload,
+        "timestamp": msg.timestamp,
+    }
+    # Try live delivery first
+    target_ws = active_connections.get(msg.to)
+    if target_ws:
+        try:
+            await target_ws.send_text(json.dumps(data))
+            return {"ok": True, "delivered": True}
+        except Exception:
+            active_connections.pop(msg.to, None)
+
+    # Recipient offline - persist to Supabase
+    if supabase:
+        try:
+            supabase.table("pending_messages").insert({
+                "to_device": msg.to,
+                "from_device": msg.from_id,
+                "payload": msg.payload,
+                "timestamp": msg.timestamp,
+                "created_at": datetime.utcnow().isoformat(),
+            }).execute()
+        except Exception as e:
+            print(f"Supabase insert failed: {e}")
+    else:
+        queue_signal(msg.to, data)
+
+    return {"ok": True, "delivered": False, "queued": True}
+
 @app.websocket("/signal")
 async def signal_ws(ws: WebSocket, deviceId: str):
     await ws.accept()
     active_connections[deviceId] = ws
 
+    # Flush in-memory queue
     if deviceId in pending_signals:
-        for msg in pending_signals.pop(deviceId):
+        for m in pending_signals.pop(deviceId):
             try:
-                await ws.send_text(json.dumps(msg))
+                await ws.send_text(json.dumps(m))
             except Exception:
                 pass
+
+    # Flush Supabase queue
+    if supabase:
+        try:
+            rows = supabase.table("pending_messages")\
+                .select("*")\
+                .eq("to_device", deviceId)\
+                .execute()
+            if rows.data:
+                for row in rows.data:
+                    try:
+                        await ws.send_text(json.dumps({
+                            "type": "relay",
+                            "from_id": row["from_device"],
+                            "to": deviceId,
+                            "payload": row["payload"],
+                            "timestamp": row["timestamp"],
+                        }))
+                    except Exception:
+                        pass
+                # Delete delivered messages
+                supabase.table("pending_messages")\
+                    .delete()\
+                    .eq("to_device", deviceId)\
+                    .execute()
+        except Exception as e:
+            print(f"Supabase flush failed: {e}")
 
     try:
         while True:
@@ -112,8 +188,8 @@ def queue_signal(device_id: str, msg: dict):
         pending_signals[device_id] = []
     queue = pending_signals[device_id]
     queue.append(msg)
-    if len(queue) > 10:
-        pending_signals[device_id] = queue[-10:]
+    if len(queue) > 50:
+        pending_signals[device_id] = queue[-50:]
 
 @app.on_event("startup")
 async def startup():
