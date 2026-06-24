@@ -164,7 +164,7 @@ export default function ChatScreen({ contact, onBack, onDisconnect }: Props) {
     try {
       // Encrypt with contact's key so they can decrypt
       const encrypted = await encryptMessage(contact.sharedKey, content)
-      const sent = webrtcService.isConnected() ? await webrtcService.send(encrypted) : false
+      const sent = await webrtcService.send(encrypted)
       // Not connected or send failed -> mark pending, will auto-send on next connect
       const updated = { ...msg, status: sent ? 'delivered' : 'pending' } as Message
       saveMessageToDB(updated)
@@ -226,7 +226,7 @@ export default function ChatScreen({ contact, onBack, onDisconnect }: Props) {
   }
 
   return (
-    <KeyboardAvoidingView style={styles.container} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
+    <KeyboardAvoidingView style={styles.container} behavior="padding" keyboardVerticalOffset={Platform.OS === 'android' ? 25 : 0}>
       <View style={styles.header}>
         <TouchableOpacity onPress={onBack}>
           <Text style={styles.backText}>←</Text>
