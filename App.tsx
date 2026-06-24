@@ -6,6 +6,7 @@ import { colors } from './src/utils/tokens'
 import { useStore } from './src/store'
 import { getProfile, getContacts, Contact } from './src/services/identity'
 import * as SQLite from 'expo-sqlite'
+import { webrtcService } from './src/services/webrtc'
 
 import SetupScreen from './src/screens/SetupScreen'
 import HomeScreen from './src/screens/HomeScreen'
@@ -48,7 +49,13 @@ export default function App() {
 
   function openContact(contact: Contact) {
     setActiveContact(contact)
-    setScreen('connect')
+    // If already connected to this exact contact, skip re-handshake
+    // and go straight back to the live chat
+    if (webrtcService.isConnected() && activeContact?.deviceId === contact.deviceId) {
+      setScreen('chat')
+    } else {
+      setScreen('connect')
+    }
   }
 
   if (screen === 'loading') {

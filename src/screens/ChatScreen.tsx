@@ -17,7 +17,7 @@ interface Message {
   content: string
   timestamp: number
   direction: 'sent' | 'received'
-  status: 'sending' | 'delivered' | 'failed'
+  status: 'sending' | 'delivered' | 'failed' | 'pending'
 }
 
 interface Props {
@@ -31,6 +31,8 @@ let msgCounter = 0
 export default function ChatScreen({ contact, onBack, onDisconnect }: Props) {
   const { connectionState, setConnectionState } = useStore()
   const [messages, setMessages] = useState<Message[]>([])
+  const messagesRef = useRef<Message[]>([])
+  useEffect(() => { messagesRef.current = messages }, [messages])
   const [input, setInput] = useState('')
   const [fingerprint, setFingerprint] = useState('')
   const [fpVerified, setFpVerified] = useState(false)
@@ -47,6 +49,12 @@ export default function ChatScreen({ contact, onBack, onDisconnect }: Props) {
     if (!profile) return
     myKeyRef.current = profile.sharedKey
 
+    // Sync actual current connection state immediately on mount
+    // (connection may have already succeeded in ConnectScreen before navigating here)
+    if (webrtcService.isConnected()) {
+      setConnectionState('connected')
+    }
+
     // Generate fingerprint from both keys
     const fp = await generateFingerprint(profile.sharedKey, contact.sharedKey)
     setFingerprint(fp)
@@ -58,13 +66,9 @@ export default function ChatScreen({ contact, onBack, onDisconnect }: Props) {
     webrtcService.init({
       onMessage: async (encrypted: string) => {
         try {
-          // Try decrypting with contact's key first, then our key
-          let content = ''
-          try {
-            content = await decryptMessage(contact.sharedKey, encrypted)
-          } catch {
-            content = await decryptMessage(myKeyRef.current, encrypted)
-          }
+          // Always decrypt with OUR OWN key - the sender encrypted it
+          // using our sharedKey (taken from our QR) so only we can read it
+          const content = await decryptMessage(myKeyRef.current, encrypted)
           const msg: Message = {
             id: String(++msgCounter),
             content,
@@ -79,10 +83,31 @@ export default function ChatScreen({ contact, onBack, onDisconnect }: Props) {
           console.error('Failed to decrypt incoming message')
         }
       },
-      onConnected: () => setConnectionState('connected'),
+      onConnected: () => {
+        setConnectionState('connected')
+        flushPendingMessages()
+      },
       onDisconnected: () => setConnectionState('disconnected'),
       onError: (e) => console.error('[WebRTC]', e),
     })
+  }
+
+  async function flushPendingMessages() {
+    // Resend any messages that were queued while disconnected
+    const stillPending = messagesRef.current.filter(m => m.direction === 'sent' && m.status === 'pending')
+    for (const msg of stillPending) {
+      try {
+        const encrypted = await encryptMessage(contact.sharedKey, msg.content)
+        const sent = webrtcService.send(encrypted)
+        if (sent) {
+          const updated = { ...msg, status: 'delivered' as const }
+          saveMessageToDB(updated)
+          setMessages(prev => prev.map(m => m.id === msg.id ? updated : m))
+        }
+      } catch {
+        // leave as pending, will retry on next connect
+      }
+    }
   }
 
   function loadMessages() {
@@ -139,12 +164,13 @@ export default function ChatScreen({ contact, onBack, onDisconnect }: Props) {
     try {
       // Encrypt with contact's key so they can decrypt
       const encrypted = await encryptMessage(contact.sharedKey, content)
-      const sent = webrtcService.send(encrypted)
-      const updated = { ...msg, status: sent ? 'delivered' : 'failed' } as Message
+      const sent = webrtcService.isConnected() ? webrtcService.send(encrypted) : false
+      // Not connected or send failed -> mark pending, will auto-send on next connect
+      const updated = { ...msg, status: sent ? 'delivered' : 'pending' } as Message
       saveMessageToDB(updated)
       setMessages(prev => prev.map(m => m.id === msg.id ? updated : m))
     } catch (e) {
-      setMessages(prev => prev.map(m => m.id === msg.id ? { ...m, status: 'failed' } : m))
+      setMessages(prev => prev.map(m => m.id === msg.id ? { ...m, status: 'pending' } : m))
     }
   }
 

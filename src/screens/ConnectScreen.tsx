@@ -7,6 +7,7 @@ import QRCode from 'react-native-qrcode-svg'
 import { CameraView, useCameraPermissions } from 'expo-camera'
 import { colors, spacing, text, radius } from '../utils/tokens'
 import { webrtcService } from '../services/webrtc'
+import { debugLog } from '../services/debugLog'
 import { Contact, getProfile } from '../services/identity'
 
 type Step =
@@ -29,8 +30,10 @@ export default function ConnectScreen({ contact, onConnected, onCancel }: Props)
   const [permission, requestPermission] = useCameraPermissions()
   const [scanned, setScanned] = useState(false)
   const [connectMsg, setConnectMsg] = useState('Connecting via internet...')
+  const [debugLogs, setDebugLogs] = useState<string[]>([])
 
   useEffect(() => {
+    const unsubscribe = debugLog.subscribe(setDebugLogs)
     webrtcService.init({
       onMessage: () => {},
       onConnected: () => {
@@ -40,7 +43,7 @@ export default function ConnectScreen({ contact, onConnected, onCancel }: Props)
       onDisconnected: () => {},
       onError: (e) => Alert.alert('Error', e),
     })
-    return () => {}
+    return () => { unsubscribe() }
   }, [])
 
   // ── SAME WIFI (QR) ──────────────────────────────────────
@@ -256,6 +259,16 @@ export default function ConnectScreen({ contact, onConnected, onCancel }: Props)
           <Text style={styles.instruction}>Connected!</Text>
         </View>
       )}
+      {debugLogs.length > 0 && (step === 'remote_connecting' || step === 'connecting') && (
+        <View style={styles.debugPanel}>
+          <Text style={styles.debugTitle}>DEBUG LOG</Text>
+          <ScrollView style={styles.debugScroll}>
+            {debugLogs.map((log, i) => (
+              <Text key={i} style={styles.debugLine}>{log}</Text>
+            ))}
+          </ScrollView>
+        </View>
+      )}
     </View>
   )
 }
@@ -286,4 +299,31 @@ const styles = StyleSheet.create({
   cornerBR: { bottom: 0, right: 0, borderTopWidth: 0, borderLeftWidth: 0 },
   waiting: { fontSize: text.sm, color: colors.textMuted, fontFamily: 'Courier New' },
   connectedIcon: { fontSize: 64, color: colors.green },
+  debugPanel: {
+    position: 'absolute',
+    bottom: 0,
+    left: 0,
+    right: 0,
+    maxHeight: 220,
+    backgroundColor: 'rgba(0,0,0,0.95)',
+    borderTopWidth: 1,
+    borderTopColor: colors.purple,
+    padding: spacing.sm,
+  },
+  debugTitle: {
+    fontSize: 10,
+    color: colors.purpleLight,
+    fontFamily: 'Courier New',
+    letterSpacing: 2,
+    marginBottom: spacing.xs,
+  },
+  debugScroll: {
+    maxHeight: 190,
+  },
+  debugLine: {
+    fontSize: 10,
+    color: '#0f0',
+    fontFamily: 'Courier New',
+    marginBottom: 2,
+  },
 })
