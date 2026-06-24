@@ -7,8 +7,9 @@ import {
 import { compressSDP, decompressSDP } from './sdpCompress'
 import { signalingService, SignalMessage } from './signaling'
 import { debugLog } from './debugLog'
+import { relayService } from './relay'
 
-export type ConnectionState = 'idle' | 'connecting' | 'connected' | 'disconnected'
+export type ConnectionState = 'idle' | 'connecting' | 'connected' | 'disconnected' | 'relay'
 
 export interface WebRTCCallbacks {
   onMessage: (content: string) => void
@@ -21,16 +22,6 @@ const RTC_CONFIG: RTCConfiguration = {
   iceServers: [
     { urls: 'stun:stun.l.google.com:19302' },
     { urls: 'stun:stun1.l.google.com:19302' },
-    {
-      urls: 'turn:turn.speed.cloudflare.com:50000',
-      username: 'webrtc',
-      credential: 'webrtc',
-    },
-    {
-      urls: 'turns:turn.speed.cloudflare.com:443?transport=tcp',
-      username: 'webrtc',
-      credential: 'webrtc',
-    },
   ],
 }
 
@@ -40,6 +31,7 @@ class WebRTCService {
   private callbacks: WebRTCCallbacks | null = null
   private myDeviceId = ''
   private peerDeviceId = ''
+  private iceFailTimer: ReturnType<typeof setTimeout> | null = null
   state: ConnectionState = 'idle'
 
   init(callbacks: WebRTCCallbacks) {
@@ -62,18 +54,22 @@ class WebRTCService {
 
     pc.onconnectionstatechange = () => {
       const s = (pc as any).connectionState
-      debugLog.log('[WebRTC] Connection state changed: ' + s)
+      debugLog.log('[WebRTC] Connection state: ' + s)
       if (s === 'connected') {
+        this.clearIceFailTimer()
         this.state = 'connected'
         this.callbacks?.onConnected()
       } else if (['disconnected', 'failed', 'closed'].includes(s)) {
-        this.state = 'disconnected'
-        this.callbacks?.onDisconnected()
+        this.fallbackToRelay()
       }
     }
 
     pc.oniceconnectionstatechange = () => {
-      debugLog.log('[WebRTC] ICE connection state: ' + (pc as any).iceConnectionState)
+      const s = (pc as any).iceConnectionState
+      debugLog.log('[WebRTC] ICE state: ' + s)
+      if (s === 'failed') {
+        this.fallbackToRelay()
+      }
     }
 
     pc.ondatachannel = (e: any) => {
@@ -86,15 +82,34 @@ class WebRTCService {
   private setupDC(dc: any) {
     this.dc = dc
     dc.onopen = () => {
+      this.clearIceFailTimer()
       this.state = 'connected'
       this.callbacks?.onConnected()
     }
     dc.onclose = () => {
-      this.state = 'disconnected'
-      this.callbacks?.onDisconnected()
+      this.fallbackToRelay()
     }
     dc.onmessage = (e: any) => {
       this.callbacks?.onMessage(e.data as string)
+    }
+  }
+
+  private fallbackToRelay() {
+    if (this.state === 'relay') return
+    debugLog.log('[WebRTC] P2P failed, switching to relay mode')
+    this.state = 'relay'
+    this.dc?.close()
+    this.pc?.close()
+    this.dc = null
+    this.pc = null
+    // Still considered "connected" from user perspective
+    this.callbacks?.onConnected()
+  }
+
+  private clearIceFailTimer() {
+    if (this.iceFailTimer) {
+      clearTimeout(this.iceFailTimer)
+      this.iceFailTimer = null
     }
   }
 
@@ -148,23 +163,34 @@ class WebRTCService {
   async connectViaServer(myDeviceId: string, peerDeviceId: string, isInitiator: boolean): Promise<void> {
     this.myDeviceId = myDeviceId
     this.peerDeviceId = peerDeviceId
+    relayService.setDeviceId(myDeviceId)
     this.state = 'connecting'
 
+    // ICE fail timer — fallback to relay after 15s if P2P doesn't connect
+    this.iceFailTimer = setTimeout(() => {
+      if (this.state === 'connecting') {
+        debugLog.log('[WebRTC] ICE timeout, falling back to relay')
+        this.fallbackToRelay()
+      }
+    }, 15000)
+
     signalingService.setHandler(async (msg: SignalMessage) => {
-      debugLog.log('[WebRTC] Received signal: ' + msg.type + ' from ' + msg.from_id)
-      if (msg.from_id !== peerDeviceId) {
-        debugLog.log('[WebRTC] Ignoring signal from unknown peer')
+      debugLog.log('[WebRTC] Signal: ' + msg.type + ' from ' + msg.from_id)
+
+      // Handle incoming relay messages
+      if (msg.type === 'relay') {
+        this.callbacks?.onMessage(msg.payload)
         return
       }
 
+      if (msg.from_id !== peerDeviceId) return
+
       if (msg.type === 'offer' && !isInitiator) {
-        debugLog.log('[WebRTC] Processing offer, creating answer')
         this.pc = this.createPC()
         const offer = JSON.parse(msg.payload)
         await this.pc.setRemoteDescription(new RTCSessionDescription(offer))
         const answer = await this.pc.createAnswer()
         await this.pc.setLocalDescription(answer as RTCSessionDescription)
-        debugLog.log('[WebRTC] Sending answer')
         signalingService.send({
           type: 'answer',
           from_id: myDeviceId,
@@ -172,27 +198,19 @@ class WebRTCService {
           payload: JSON.stringify(answer),
         })
       } else if (msg.type === 'answer' && this.pc) {
-        debugLog.log('[WebRTC] Processing answer')
         const answer = JSON.parse(msg.payload)
         await this.pc.setRemoteDescription(new RTCSessionDescription(answer))
-        debugLog.log('[WebRTC] Remote description set from answer')
       } else if (msg.type === 'ice' && this.pc) {
-        debugLog.log('[WebRTC] Adding ICE candidate')
         const candidate = JSON.parse(msg.payload)
         try {
           await this.pc.addIceCandidate(new RTCIceCandidate(candidate))
-          debugLog.log('[WebRTC] ICE candidate added successfully')
         } catch (e) {
-          debugLog.log('[WebRTC] ICE candidate failed:', e)
+          debugLog.log('[WebRTC] ICE candidate failed: ' + e)
         }
-      } else {
-        debugLog.log('[WebRTC] Unhandled signal, pc exists: ' + !!this.pc + ' isInitiator: ' + isInitiator)
       }
     })
 
-    debugLog.log('[WebRTC] Connecting to signaling server as ' + myDeviceId)
     await signalingService.connect(myDeviceId)
-    debugLog.log('[WebRTC] Signaling connected, isInitiator: ' + isInitiator)
 
     if (isInitiator) {
       this.pc = this.createPC()
@@ -200,32 +218,41 @@ class WebRTCService {
       this.setupDC(dc)
       const offer = await this.pc.createOffer()
       await this.pc.setLocalDescription(offer as RTCSessionDescription)
-      debugLog.log('[WebRTC] Sending offer to ' + peerDeviceId)
-      const sent = signalingService.send({
+      signalingService.send({
         type: 'offer',
         from_id: myDeviceId,
         to: peerDeviceId,
         payload: JSON.stringify(offer),
       })
-      debugLog.log('[WebRTC] Offer send result: ' + sent)
     }
   }
 
   // ─── Send / Status ───────────────────────────────────────────
 
-  send(content: string): boolean {
-    if (!this.dc || (this.dc as any).readyState !== 'open') return false
-    this.dc.send(content)
-    return true
+  async send(content: string): Promise<boolean> {
+    // P2P path
+    if (this.dc && (this.dc as any).readyState === 'open') {
+      this.dc.send(content)
+      return true
+    }
+    // Relay path
+    if (this.state === 'relay' && this.peerDeviceId) {
+      return await relayService.send(this.peerDeviceId, content)
+    }
+    return false
   }
 
   isConnected(): boolean {
-    // Check the real DataChannel state, not just our manually-tracked flag
     const dcOpen = this.dc != null && (this.dc as any).readyState === 'open'
-    return dcOpen || this.state === 'connected'
+    return dcOpen || this.state === 'connected' || this.state === 'relay'
+  }
+
+  isRelay(): boolean {
+    return this.state === 'relay'
   }
 
   close() {
+    this.clearIceFailTimer()
     this.state = 'idle'
     this.dc?.close()
     this.pc?.close()

@@ -98,7 +98,7 @@ export default function ChatScreen({ contact, onBack, onDisconnect }: Props) {
     for (const msg of stillPending) {
       try {
         const encrypted = await encryptMessage(contact.sharedKey, msg.content)
-        const sent = webrtcService.send(encrypted)
+        const sent = await webrtcService.send(encrypted)
         if (sent) {
           const updated = { ...msg, status: 'delivered' as const }
           saveMessageToDB(updated)
@@ -164,7 +164,7 @@ export default function ChatScreen({ contact, onBack, onDisconnect }: Props) {
     try {
       // Encrypt with contact's key so they can decrypt
       const encrypted = await encryptMessage(contact.sharedKey, content)
-      const sent = webrtcService.isConnected() ? webrtcService.send(encrypted) : false
+      const sent = webrtcService.isConnected() ? await webrtcService.send(encrypted) : false
       // Not connected or send failed -> mark pending, will auto-send on next connect
       const updated = { ...msg, status: sent ? 'delivered' : 'pending' } as Message
       saveMessageToDB(updated)
