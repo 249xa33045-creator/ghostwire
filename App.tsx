@@ -42,20 +42,41 @@ export default function App() {
       setContacts(contacts)
       setOnboarded(true)
       setScreen('home')
-    } catch {
-      setScreen('setup')
+    } catch (err) {
+      console.error('[Bootstrap] Error:', err)
+      // Only go to setup if profile genuinely missing
+      try {
+        const { getProfile } = require('./src/services/identity')
+        const profile = await getProfile()
+        if (!profile) {
+          setScreen('setup')
+        } else {
+          setScreen('home')
+        }
+      } catch {
+        setScreen('setup')
+      }
     }
   }
 
-  function openContact(contact: Contact) {
+  async function openContact(contact: Contact) {
     setActiveContact(contact)
-    // If already connected to this exact contact, skip re-handshake
-    // and go straight back to the live chat
+    // Already connected to this contact — go straight to chat
     if (webrtcService.isConnected() && activeContact?.deviceId === contact.deviceId) {
       setScreen('chat')
-    } else {
-      setScreen('connect')
+      return
     }
+    // Auto-connect via relay, skip ConnectScreen entirely
+    setScreen('chat')
+    const profile = await getProfile()
+    if (!profile) return
+    webrtcService.init({
+      onMessage: () => {},
+      onConnected: () => {},
+      onDisconnected: () => {},
+      onError: () => {},
+    })
+    webrtcService.connectViaServer(profile.deviceId, contact.deviceId, true)
   }
 
   if (screen === 'loading') {
