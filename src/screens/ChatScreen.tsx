@@ -287,7 +287,7 @@ export default function ChatScreen({ contact, onBack, onDisconnect }: Props) {
             <Text style={styles.emptyChatText}>
               {connectionState === 'connected'
                 ? 'Channel open. Messages are end-to-end encrypted.'
-                : 'Not connected. Go back and connect first.'}
+                : 'Connecting... messages will send automatically.'}
             </Text>
           </View>
         }
@@ -302,12 +302,12 @@ export default function ChatScreen({ contact, onBack, onDisconnect }: Props) {
           placeholderTextColor={colors.textMuted}
           multiline
           maxLength={4000}
-          editable={connectionState === 'connected'}
+          editable={true}
         />
         <TouchableOpacity
-          style={[styles.sendBtn, (!input.trim() || connectionState !== 'connected') && styles.sendBtnDisabled]}
+          style={[styles.sendBtn, !input.trim() && styles.sendBtnDisabled]}
           onPress={sendMessage}
-          disabled={!input.trim() || connectionState !== 'connected'}
+          disabled={!input.trim()}
         >
           <Text style={styles.sendBtnText}>↑</Text>
         </TouchableOpacity>
