@@ -1,13 +1,12 @@
 import React, { useState, useEffect } from 'react'
 import {
   View, Text, TouchableOpacity, StyleSheet,
-  ActivityIndicator, Alert, ScrollView
+  ActivityIndicator, Alert
 } from 'react-native'
 import QRCode from 'react-native-qrcode-svg'
 import { CameraView, useCameraPermissions } from 'expo-camera'
 import { colors, spacing, text, radius } from '../utils/tokens'
 import { webrtcService } from '../services/webrtc'
-import { debugLog } from '../services/debugLog'
 import { Contact, getProfile } from '../services/identity'
 
 type Step =
@@ -30,10 +29,8 @@ export default function ConnectScreen({ contact, onConnected, onCancel }: Props)
   const [permission, requestPermission] = useCameraPermissions()
   const [scanned, setScanned] = useState(false)
   const [connectMsg, setConnectMsg] = useState('Connecting via internet...')
-  const [debugLogs, setDebugLogs] = useState<string[]>([])
 
   useEffect(() => {
-    const unsubscribe = debugLog.subscribe(setDebugLogs)
     webrtcService.init({
       onMessage: () => {},
       onConnected: () => {
@@ -43,7 +40,7 @@ export default function ConnectScreen({ contact, onConnected, onCancel }: Props)
       onDisconnected: () => {},
       onError: (e) => Alert.alert('Error', e),
     })
-    return () => { unsubscribe() }
+    return () => {}
   }, [])
 
   // ── SAME WIFI (QR) ──────────────────────────────────────
@@ -259,16 +256,7 @@ export default function ConnectScreen({ contact, onConnected, onCancel }: Props)
           <Text style={styles.instruction}>Connected!</Text>
         </View>
       )}
-      {debugLogs.length > 0 && (step === 'remote_connecting' || step === 'connecting') && (
-        <View style={styles.debugPanel}>
-          <Text style={styles.debugTitle}>DEBUG LOG</Text>
-          <ScrollView style={styles.debugScroll}>
-            {debugLogs.map((log, i) => (
-              <Text key={i} style={styles.debugLine}>{log}</Text>
-            ))}
-          </ScrollView>
-        </View>
-      )}
+
     </View>
   )
 }
