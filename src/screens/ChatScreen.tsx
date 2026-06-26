@@ -2,7 +2,8 @@ import React, { useState, useEffect, useRef, useCallback } from 'react'
 import {
   View, Text, TextInput, TouchableOpacity,
   FlatList, StyleSheet, Alert,
-  KeyboardAvoidingView, Platform, ActivityIndicator
+  KeyboardAvoidingView, Platform, ActivityIndicator,
+  BackHandler
 } from 'react-native'
 import { colors, spacing, text, radius } from '../utils/tokens'
 import { useStore } from '../store'
@@ -41,7 +42,11 @@ export default function ChatScreen({ contact, onBack, onDisconnect }: Props) {
 
   useEffect(() => {
     setup()
-    return () => {}
+    const backHandler = BackHandler.addEventListener('hardwareBackPress', () => {
+      onBack()
+      return true
+    })
+    return () => backHandler.remove()
   }, [])
 
   async function setup() {
@@ -113,10 +118,14 @@ export default function ChatScreen({ contact, onBack, onDisconnect }: Props) {
   function loadMessages() {
     try {
       const db = SQLite.openDatabaseSync('ghostwire.db')
+      console.log('[DB] Loading messages for contact_id:', contact.deviceId)
+      const allRows = db.getAllSync<any>('SELECT id, contact_id FROM messages')
+      console.log('[DB] All messages in DB:', JSON.stringify(allRows))
       const rows = db.getAllSync<any>(
         'SELECT * FROM messages WHERE contact_id = ? ORDER BY timestamp ASC',
         contact.deviceId
       )
+      console.log('[DB] Matched rows:', rows.length)
       const loaded: Message[] = rows.map((r: any) => ({
         id: r.id,
         content: r.content_encrypted, // stored as plaintext for now
@@ -228,7 +237,7 @@ export default function ChatScreen({ contact, onBack, onDisconnect }: Props) {
   return (
     <KeyboardAvoidingView style={styles.container} behavior="padding" keyboardVerticalOffset={Platform.OS === 'android' ? 25 : 0}>
       <View style={styles.header}>
-        <TouchableOpacity onPress={onBack}>
+        <TouchableOpacity onPress={onBack} hitSlop={{top:10,bottom:10,left:10,right:10}}>
           <Text style={styles.backText}>←</Text>
         </TouchableOpacity>
         <View style={styles.headerCenter}>
@@ -310,7 +319,7 @@ export default function ChatScreen({ contact, onBack, onDisconnect }: Props) {
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: colors.bg },
   header: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: spacing.md, paddingVertical: spacing.sm, borderBottomWidth: 1, borderBottomColor: colors.border, gap: spacing.sm },
-  backText: { fontSize: text.lg, color: colors.purpleLight },
+  backText: { fontSize: 28, color: colors.purpleLight, paddingHorizontal: 4 },
   headerCenter: { flex: 1 },
   headerName: { fontSize: text.md, color: colors.text, fontWeight: '600' },
   statusRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.xs, marginTop: 2 },
