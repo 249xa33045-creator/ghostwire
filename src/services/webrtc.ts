@@ -235,8 +235,8 @@ class WebRTCService {
       this.dc.send(content)
       return true
     }
-    // Relay path
-    if (this.state === 'relay' && this.peerDeviceId) {
+    // Relay path — always try if peer is known, regardless of state
+    if (this.peerDeviceId) {
       return await relayService.send(this.peerDeviceId, content)
     }
     return false
